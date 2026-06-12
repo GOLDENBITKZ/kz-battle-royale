@@ -11,17 +11,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'missing fields' }, { status: 400 })
     }
 
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    )
+    const url  = process.env.NEXT_PUBLIC_SUPABASE_URL!
+    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
-    // Validate token and get user
-    const { data: { user }, error: authErr } = await supabase.auth.getUser(token)
+    // Validate token with anon client (auth.getUser works with any key)
+    const baseClient = createClient(url, anon)
+    const { data: { user }, error: authErr } = await baseClient.auth.getUser(token)
     if (authErr || !user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
 
-    // Check subscription
-    const { data: profile } = await supabase
+    // Authenticated client — uses user's JWT so they can read their own profile
+    const userClient = createClient(url, anon, {
+      global: { headers: { Authorization: `Bearer ${token}` } },
+    })
+
+    // Check subscription (user reads their own row — RLS allows it)
+    const { data: profile } = await userClient
       .from('profiles').select('paid_until').eq('id', user.id).single()
     if (!profile?.paid_until || new Date(profile.paid_until) <= new Date()) {
       return NextResponse.json({ error: 'subscription required', needsPayment: true }, { status: 402 })
@@ -29,9 +33,10 @@ export async function POST(req: NextRequest) {
 
     const clicks = Math.min(Math.max(1, Math.floor(clickCount)), 500)
 
-    const { data, error } = await supabase.rpc('process_click_batch', {
-      p_user_id:    user.id,
-      p_city_id:    targetCityId,
+    // process_click_batch is SECURITY DEFINER — works with authenticated user
+    const { data, error } = await userClient.rpc('process_click_batch', {
+      p_user_id:     user.id,
+      p_city_id:     targetCityId,
       p_click_count: clicks,
     })
 

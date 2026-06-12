@@ -15,15 +15,10 @@ export async function GET() {
   const groqKey = process.env.GROQ_API_KEY
   if (!groqKey) return NextResponse.json({ skipped: 'no GROQ_API_KEY' })
 
-  // Use anon key for public city_state read
+  // anon key for all operations — upsert goes via SECURITY DEFINER RPC
   const db = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-  )
-  // Use service role for upsert to game_events
-  const admin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
   )
 
   const { data: cities } = await db
@@ -70,14 +65,10 @@ export async function GET() {
 
   let upsertError: string | null = null
   if (commentary) {
-    // Strip leading/trailing quotes that LLM sometimes adds
-    const clean = commentary.replace(/^["«»]+|["«»]+$/g, '').trim()
-    const { error } = await admin.from('game_events').upsert(
-      { id: 'ai_commentary', type: 'commentary', message: clean, data: {}, created_at: new Date().toISOString() },
-      { onConflict: 'id' }
-    )
+    const clean = commentary.replace(/^["«»"]+|["«»"]+$/g, '').trim()
+    const { error } = await db.rpc('upsert_commentary', { p_message: clean })
     upsertError = error?.message ?? null
   }
 
-  return NextResponse.json({ ok: true, commentary, upsertError })
+  return NextResponse.json({ ok: !upsertError, commentary, upsertError })
 }

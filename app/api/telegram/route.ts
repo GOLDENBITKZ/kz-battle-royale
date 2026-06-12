@@ -44,16 +44,25 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true })
   }
 
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!serviceKey) {
+    await send(chatId, '⚠️ SUPABASE_SERVICE_ROLE_KEY не задан. Команды /users /subs /top недоступны.')
+    return NextResponse.json({ ok: true })
+  }
+
   const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
+    serviceKey
   )
+
+  // anon client for public tables (city_state)
+  const pub = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!)
 
   if (cmd === '/stats') {
     const [{ count: total }, { count: subs }, { data: cities }] = await Promise.all([
       supabase.from('profiles').select('id', { count: 'exact', head: true }),
       supabase.from('profiles').select('id', { count: 'exact', head: true }).gt('paid_until', new Date().toISOString()),
-      supabase.from('city_state').select('city_id, owner_faction, hp, max_hp'),
+      pub.from('city_state').select('city_id, owner_faction, hp, max_hp'),
     ])
 
     const byFaction: Record<string, string[]> = {}
@@ -115,7 +124,7 @@ export async function POST(req: NextRequest) {
     await send(chatId, `🏆 <b>Топ-10 игроков:</b>\n\n${lines}`)
 
   } else if (cmd === '/cities') {
-    const { data } = await supabase
+    const { data } = await pub
       .from('city_state')
       .select('city_id, owner_faction, hp, max_hp, total_attacks')
 
