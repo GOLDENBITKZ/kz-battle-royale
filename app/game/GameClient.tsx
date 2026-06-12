@@ -1,87 +1,143 @@
 'use client'
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
 import dynamic from 'next/dynamic'
-import type { GameMapHandle, GameStateUpdate } from '@/components/GameMap'
-import NewsTicker from '@/components/NewsTicker'
-import ComboMeter from '@/components/ComboMeter'
-import AbilityBar from '@/components/AbilityBar'
-import AchievementToast from '@/components/AchievementToast'
-import EventBanner from '@/components/EventBanner'
-import OnboardingTour, { shouldShowOnboarding } from '@/components/OnboardingTour'
-import PlayerProfile from '@/components/PlayerProfile'
-import DailyQuests from '@/components/DailyQuests'
-import Leaderboard from '@/components/Leaderboard'
-import FactionHUD from '@/components/FactionHUD'
-
-import { useClickBatcher } from '@/hooks/useClickBatcher'
-import { useCombo } from '@/hooks/useCombo'
-import { useAbilities } from '@/hooks/useAbilities'
-import { useAchievements } from '@/hooks/useAchievements'
-import { useDailyQuests } from '@/hooks/useDailyQuests'
-import { usePlayerProfile } from '@/hooks/usePlayerProfile'
-import { useSpecialEvents } from '@/hooks/useSpecialEvents'
-
+import type { GameMapHandle } from '@/components/GameMap'
+import { useClickBatcher }   from '@/hooks/useClickBatcher'
+import { useCombo }          from '@/hooks/useCombo'
+import { useAbilities }      from '@/hooks/useAbilities'
+import { useAchievements }   from '@/hooks/useAchievements'
+import { useDailyQuests }    from '@/hooks/useDailyQuests'
+import { usePlayerProfile }  from '@/hooks/usePlayerProfile'
+import { useSpecialEvents }  from '@/hooks/useSpecialEvents'
+import { useGameState }      from '@/hooks/useGameState'
 import { FACTIONS, CITIES, type FactionId, type CityId } from '@/lib/config'
-import { getLevelConfig } from '@/lib/levels'
-import { initAudio } from '@/lib/sound'
-import { CITY_TRAITS, getTimeBonus } from '@/lib/city-traits'
-import { playClick, playCapture, playCityLost } from '@/lib/sound'
+import { getLevelConfig }    from '@/lib/levels'
+import { initAudio, playClick, playCapture, playCityLost, playLevelUp, playComboMilestone } from '@/lib/sound'
+import AchievementToast      from '@/components/AchievementToast'
+import AbilityBar            from '@/components/AbilityBar'
+import DailyQuests           from '@/components/DailyQuests'
+import Leaderboard           from '@/components/Leaderboard'
+import { getSupabase }       from '@/lib/supabase-client'
 
-const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL!
-
-// GameMap is canvas-heavy — load client-only
 const GameMap = dynamic(() => import('@/components/GameMap'), { ssr: false })
 
 interface Props {
   userId: string; faction: FactionId; cityId: string; displayName: string
   accessToken: string; initialXP: number; initialLevel: number
-  initialStreak: number; totalClicks: number
+  initialStreak: number; totalClicks: number; referralCode?: string
 }
 
-type BottomTab = 'battle' | 'quests' | 'rank' | 'me'
+type Tab = 'battle' | 'quests' | 'rank' | 'clan' | 'me'
+
+interface FloatNum { id: string; val: string; x: number; crit: boolean }
 
 export default function GameClient({
   userId, faction, cityId, displayName,
   accessToken, initialXP, initialLevel, initialStreak, totalClicks: initClicks,
+  referralCode,
 }: Props) {
   const mapRef = useRef<GameMapHandle>(null)
+  const fc     = FACTIONS[faction]
 
+  /* ── state ── */
   const [selectedTarget, setSelectedTarget] = useState<CityId | null>(null)
-  const [scores, setScores] = useState<Record<FactionId, number>>({ south: 0, east: 0, center: 0, west: 0, north: 0 })
-  const [live, setLive]         = useState<'connecting' | 'live' | 'offline'>('connecting')
-  const [bottomTab, setBottomTab] = useState<BottomTab>('battle')
-  const [hudOpen, setHudOpen]   = useState(false)
-  const [showOnboard, setShowOnboard] = useState(false)
-  const [attackFlash, setAttackFlash] = useState(false)
-  const [xpPopup, setXpPopup]   = useState<string | null>(null)
-  const cityOwners = useRef<Map<CityId, FactionId>>(new Map())
+  const [tab,   setTab]   = useState<Tab>('battle')
+  const [sheet, setSheet] = useState(false)
+  const [flash, setFlash] = useState(false)
+  const [critFlash, setCritFlash] = useState(false)
+  const [floats, setFloats]       = useState<FloatNum[]>([])
+  const [commentary, setCommentary] = useState('')
+  const [activePlayers, setActivePlayers] = useState(0)
+  const [clanData, setClanData]   = useState<any>(null)
+  const [clanLoading, setClanLoading] = useState(false)
+  const [clanName, setClanName]   = useState('')
+  const [clanTag, setClanTag]     = useState('')
+  const [clanEmoji, setClanEmoji] = useState('⚔️')
 
-  const { profile, xpProgress, levelUpAnim, addXP, addClick } = usePlayerProfile(userId, {
-    xp: initialXP, level: initialLevel, streak: initialStreak, totalClicks: initClicks,
-  })
+  /* ── hooks ── */
+  const { profile, xpProgress, levelUpAnim, addXP, addClick }
+    = usePlayerProfile(userId, { xp: initialXP, level: initialLevel, streak: initialStreak, totalClicks: initClicks })
   const { event: activeEvent, xpMultiplier } = useSpecialEvents()
   const { combo, maxCombo, registerHit }     = useCombo()
   const { states: abilityStates, activating, activateAbility } = useAbilities(
-    faction, userId, accessToken, profile.xp, profile.level, (d) => addXP(d)
+    faction, userId, accessToken, profile.xp, profile.level, addXP
   )
-  const { earned, toasts: achToasts, checkAll: checkAchs, dismissToast } = useAchievements(userId)
+  const { earned: _earned, toasts: achToasts, checkAll: checkAchs, dismissToast } = useAchievements(userId)
   const { quests, progress, trackEvent } = useDailyQuests(userId, faction)
+
+  const onCapture = useCallback((cId: CityId, newOwner: FactionId, prevOwner: FactionId) => {
+    mapRef.current?.flashCapture(cId, newOwner)
+    if (newOwner === faction) {
+      playCapture(); addXP(150); trackEvent('capture', 1)
+      spawnFloat('+150 XP 🏙', false)
+      navigator.vibrate?.([50, 20, 80, 20, 80])
+    } else if (prevOwner === faction) {
+      playCityLost()
+      navigator.vibrate?.([80, 30, 80])
+    }
+  }, [faction, addXP, trackEvent])
+
+  const { update, scores, live, cityHps } = useGameState(onCapture)
+
   const { registerClick, status: clickStatus } = useClickBatcher({
-    userId, cityId: cityId as CityId, accessToken,
-    onBanned: () => setSelectedTarget(null),
-    onError: () => {},
+    userId, accessToken,
+    onBanned:  () => setSelectedTarget(null),
+    onCapture: (cId) => { addXP(150); trackEvent('capture', 1) },
+    onXP:      (xp) => addXP(xp),
   })
 
-  const targetTrait = useMemo(() =>
-    selectedTarget ? CITY_TRAITS[selectedTarget] : null, [selectedTarget])
+  /* ── apply map updates ── */
+  useEffect(() => {
+    if (update) mapRef.current?.applyUpdate(update)
+  }, [update])
 
-  // ── Attack ──
+  /* ── load commentary & active players ── */
+  useEffect(() => {
+    fetch('/api/state').then(r => r.json()).then(d => {
+      if (d.event?.message) setCommentary(d.event.message)
+      if (d.activePlayers)  setActivePlayers(d.activePlayers)
+    }).catch(() => {})
+    const t = setInterval(() => {
+      fetch('/api/state').then(r => r.json()).then(d => {
+        if (d.event?.message) setCommentary(d.event.message)
+        if (d.activePlayers)  setActivePlayers(d.activePlayers)
+      }).catch(() => {})
+    }, 30_000)
+    return () => clearInterval(t)
+  }, [])
+
+  /* ── load clan data ── */
+  useEffect(() => {
+    const supabase = getSupabase()
+    supabase
+      .from('profiles')
+      .select('clan_id, clans(id, name, tag, emoji, faction, member_count, total_damage)')
+      .eq('id', userId)
+      .single()
+      .then((res: any) => {
+        if (res?.data?.clan_id) setClanData(res.data.clans)
+      })
+  }, [userId])
+
+  /* ── level-up sound ── */
+  useEffect(() => { if (levelUpAnim) playLevelUp() }, [levelUpAnim])
+
+  /* ── floating numbers ── */
+  function spawnFloat(val: string, crit: boolean) {
+    const id = Math.random().toString(36).slice(2)
+    const x  = 20 + Math.random() * 60
+    setFloats(p => [...p.slice(-10), { id, val, x, crit }])
+    setTimeout(() => setFloats(p => p.filter(f => f.id !== id)), 850)
+  }
+
+  /* ── attack handler ── */
   const handleAttack = useCallback(() => {
     if (!selectedTarget || clickStatus === 'banned') return
     initAudio()
 
-    setAttackFlash(true)
-    setTimeout(() => setAttackFlash(false), 80)
+    const isCrit = Math.random() < 0.05
+    const dmg    = Math.round((1 + Math.floor(initialLevel / 5)) * combo.xpBonus * (isCrit ? 3 : 1))
+    const xpGain = Math.round(combo.xpBonus * xpMultiplier * (isCrit ? 2 : 1))
 
     registerClick(selectedTarget)
     registerHit()
@@ -89,145 +145,186 @@ export default function GameClient({
     playClick(combo.count)
     trackEvent('click', 1)
 
-    const xpGain = Math.round(combo.xpBonus * xpMultiplier)
+    setFlash(true)
+    setTimeout(() => setFlash(false), 80)
+
+    spawnFloat(isCrit ? `💥 КРИТ ×3!` : `−${dmg}`, isCrit)
+
+    if (isCrit) {
+      setCritFlash(true)
+      setTimeout(() => setCritFlash(false), 400)
+      navigator.vibrate?.([25, 10, 25, 10, 40])
+    } else if (combo.count >= 6) {
+      navigator.vibrate?.([15, 5, 15])
+    } else {
+      navigator.vibrate?.(8)
+    }
+
     if (xpGain > 1) {
       addXP(xpGain - 1)
-      setXpPopup(`+${xpGain} XP`)
-      setTimeout(() => setXpPopup(null), 900)
+      spawnFloat(`+${xpGain} XP`, false)
     }
-    if (navigator.vibrate) navigator.vibrate(combo.count >= 6 ? [15, 5, 15] : 8)
+
+    if (combo.count === 5 || combo.count === 10 || combo.count === 20) {
+      playComboMilestone(combo.count >= 10 ? 2 : 1)
+    }
 
     checkAchs({
       totalClicks: profile.totalClicks + 1, citiesCaptured: 0,
       maxCombo: Math.max(maxCombo, combo.count), streak: profile.streak,
-      abilitiesUsed: 0, questsDone: [...progress.values()].filter(p => p.completed).length,
+      abilitiesUsed: 0,
+      questsDone: [...progress.values()].filter(p => p.completed).length,
       referrals: 0, level: profile.level, faction, dailyClicks: 1, daysActive: profile.streak,
     })
   }, [
-    selectedTarget, clickStatus, registerClick, registerHit, addClick,
-    combo, xpMultiplier, addXP, trackEvent, checkAchs,
-    profile, maxCombo, progress, faction,
+    selectedTarget, clickStatus, registerClick, registerHit, addClick, addXP,
+    combo, xpMultiplier, trackEvent, checkAchs, profile, maxCombo, progress, faction, initialLevel,
   ])
 
-  // ── Map events ──
+  /* ── map click ── */
   const handleCityClick = useCallback((id: CityId) => {
-    if (id === cityId) { setSelectedTarget(null); return }
-    const owner = cityOwners.current.get(id) ?? CITIES[id].faction
-    if (owner === faction) { playClick(1); return }
+    const owner = cityHps[id]?.owner ?? CITIES[id].faction
+    if (id === cityId || owner === faction) { playClick(1); return }
     setSelectedTarget(id); playClick(2)
-  }, [cityId, faction])
+  }, [cityId, faction, cityHps])
 
   const handleDblTap = useCallback((id: CityId) => {
-    if (id === cityId || (cityOwners.current.get(id) ?? CITIES[id].faction) === faction) return
+    const owner = cityHps[id]?.owner ?? CITIES[id].faction
+    if (id === cityId || owner === faction) return
     setSelectedTarget(id)
     setTimeout(handleAttack, 50)
-  }, [cityId, faction, handleAttack])
+  }, [cityId, faction, cityHps, handleAttack])
 
-  // ── SSE ──
+  /* ── keyboard ── */
   useEffect(() => {
-    let es: EventSource
-    let retry: ReturnType<typeof setTimeout>
-
-    function connect() {
-      setLive('connecting')
-      es = new EventSource(`${BACKEND}/events`)
-      es.addEventListener('gamestate', (e) => {
-        const update: GameStateUpdate = JSON.parse(e.data)
-        mapRef.current?.applyUpdate(update)
-        setLive('live')
-
-        const newScores: Record<FactionId, number> = { south: 0, east: 0, center: 0, west: 0, north: 0 }
-        for (const cs of update.cities) {
-          const prev = cityOwners.current.get(cs.cityId as CityId)
-          cityOwners.current.set(cs.cityId as CityId, cs.owner as FactionId)
-
-          if (prev && prev !== cs.owner) {
-            mapRef.current?.flashCapture(cs.cityId as CityId, cs.owner as FactionId)
-            if (cs.owner === faction) {
-              playCapture(); addXP(100); trackEvent('capture', 1)
-              if (navigator.vibrate) navigator.vibrate([50, 20, 80, 20, 50])
-            } else if (prev === faction) {
-              playCityLost()
-              if (navigator.vibrate) navigator.vibrate([80, 30, 80])
-            }
-          }
-          newScores[cs.owner as FactionId] = (newScores[cs.owner as FactionId] ?? 0) + cs.score
-        }
-        setScores(newScores)
-      })
-      es.onerror = () => {
-        setLive('offline'); es.close()
-        retry = setTimeout(connect, 5000)
-      }
-    }
-    connect()
-    return () => { es?.close(); clearTimeout(retry) }
-  }, [faction, addXP, trackEvent])
-
-  // ── Keyboard ──
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
+    const fn = (e: KeyboardEvent) => {
       if (e.code === 'Space' && selectedTarget && document.activeElement?.tagName !== 'INPUT') {
         e.preventDefault(); handleAttack()
       }
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', fn)
+    return () => window.removeEventListener('keydown', fn)
   }, [selectedTarget, handleAttack])
 
-  useEffect(() => { if (shouldShowOnboarding()) setShowOnboard(true) }, [])
+  /* ── clan actions ── */
+  async function createClan() {
+    if (!clanName.trim() || !clanTag.trim()) return
+    setClanLoading(true)
+    const supabase = getSupabase()
+    const { data } = await supabase.rpc('create_clan', {
+      p_user_id:     userId,
+      p_name:        clanName.trim(),
+      p_tag:         clanTag.trim(),
+      p_emoji:       clanEmoji,
+      p_description: '',
+    })
+    setClanLoading(false)
+    if ((data as any)?.ok) window.location.reload()
+    else alert((data as any)?.error ?? 'Ошибка')
+  }
 
-  const fc    = FACTIONS[faction]
-  const lvl   = getLevelConfig(profile.level)
-  const trait = CITY_TRAITS[cityId as CityId]
-  const timeB = getTimeBonus(trait)
+  async function leaveClan() {
+    if (!confirm('Покинуть клан?')) return
+    const supabase = getSupabase()
+    await supabase.rpc('leave_clan', { p_user_id: userId })
+    setClanData(null)
+    window.location.reload()
+  }
 
+  /* ── computed ── */
+  const lvl          = getLevelConfig(profile.level)
+  const target       = selectedTarget ? CITIES[selectedTarget] : null
+  const targetHp     = selectedTarget ? cityHps[selectedTarget] : null
+  const targetHpPct  = targetHp ? Math.round((targetHp.hp / targetHp.maxHp) * 100) : 100
+  const baseDamage   = 1 + Math.floor(initialLevel / 5)
+  const effectiveDmg = Math.round(baseDamage * combo.xpBonus)
+
+  const sortedFactions = useMemo(() =>
+    (Object.entries(scores) as [FactionId, number][]).sort(([,a],[,b]) => b - a),
+    [scores]
+  )
+
+  const inviteUrl = `${typeof window !== 'undefined' ? window.location.origin : ''}/login?ref=${referralCode ?? displayName.slice(0,6).toUpperCase()}`
+
+  /* ── render ── */
   return (
-    <div className="fixed inset-0 bg-dark flex flex-col overflow-hidden select-none"
+    <div
+      className={`fixed inset-0 bg-dark flex flex-col overflow-hidden select-none ${critFlash ? 'animate-crit-shake' : ''}`}
       style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
     >
-      {showOnboard && <OnboardingTour faction={faction} onComplete={() => setShowOnboard(false)} />}
       <AchievementToast achievements={achToasts} onDismiss={dismissToast} />
 
       {/* Level-up overlay */}
       {levelUpAnim && (
-        <div className="fixed inset-0 z-40 pointer-events-none flex items-center justify-center">
-          <div className="font-pixel text-center animate-bounce">
-            <p style={{ fontSize: 64 }}>{lvl.icon}</p>
-            <p className="text-xs mt-2" style={{ color: lvl.color }}>УРОВЕНЬ {profile.level}!</p>
-            <p className="text-[10px] text-white">{lvl.title}</p>
+        <div className="fixed inset-0 z-50 pointer-events-none flex items-center justify-center bg-black/60 animate-fade-in">
+          <div className="text-center animate-level-burst">
+            <p style={{ fontSize: 72, filter: `drop-shadow(0 0 20px ${lvl.color})` }}>{lvl.icon}</p>
+            <p className="font-pixel text-[10px] mt-2" style={{ color: lvl.color, textShadow: `0 0 20px ${lvl.color}` }}>
+              УРОВЕНЬ {profile.level}!
+            </p>
+            <p className="font-pixel text-[7px] text-white mt-1">{lvl.title}</p>
           </div>
         </div>
       )}
 
-      {/* ── STATUS BAR ── */}
-      <div className="flex items-center justify-between px-3 py-1.5 bg-panel border-b border-border gap-2 flex-shrink-0 z-10">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <span className="text-sm">{lvl.icon}</span>
-          <span className="font-pixel text-[6px] truncate" style={{ color: fc.color }}>{fc.nameRu}</span>
-          <span className="font-pixel text-[5px] text-gray-600">Lv{profile.level}</span>
-          {timeB > 1.0 && (
-            <span className="font-pixel text-[5px] text-yellow-500 animate-pulse">×{timeB.toFixed(1)}⚡</span>
-          )}
-        </div>
-        <div className="flex-1 mx-2 max-w-[120px]">
-          <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
-            <div className="h-1.5 transition-all duration-300 rounded-full"
-              style={{ width: `${xpProgress.pct}%`, backgroundColor: lvl.color }} />
+      {/* ── TOP BAR ── */}
+      <div className="flex-shrink-0 z-10" style={{ background: '#0D0D15' }}>
+        {/* Row 1: faction + XP + status */}
+        <div className="flex items-center px-3 pt-2 pb-1 gap-2">
+          {/* Faction badge */}
+          <div
+            className="flex items-center gap-1.5 px-2 py-0.5 rounded-sm border"
+            style={{ borderColor: `${fc.color}50`, background: `${fc.color}14` }}
+          >
+            <span className="text-sm">{lvl.icon}</span>
+            <span className="font-pixel text-[6px]" style={{ color: fc.color }}>{fc.nameRu.split(' ')[0]}</span>
+            <span className="font-pixel text-[5px] text-gray-600">Lv{profile.level}</span>
+          </div>
+
+          {/* XP bar */}
+          <div className="flex-1 relative">
+            <div className="h-2 bg-gray-900 rounded-full overflow-hidden border border-gray-800">
+              <div
+                className="h-full rounded-full transition-all duration-500"
+                style={{ width: `${xpProgress.pct}%`, background: `linear-gradient(90deg, ${fc.color}88, ${fc.color})` }}
+              />
+            </div>
+            <p className="font-pixel text-[4px] text-gray-700 absolute right-0 -top-3">
+              {xpProgress.current}/{xpProgress.needed} XP
+            </p>
+          </div>
+
+          {/* Status cluster */}
+          <div className="flex items-center gap-2">
+            {profile.streak > 0 && (
+              <span className="font-pixel text-[6px] text-orange-400">🔥{profile.streak}</span>
+            )}
+            <span
+              className={`font-pixel text-[5px] flex items-center gap-0.5 ${
+                live === 'live' ? 'text-green-400' : live === 'offline' ? 'text-red-400' : 'text-yellow-400'
+              }`}
+            >
+              <span className={live === 'live' ? 'animate-online-dot' : ''}>●</span>
+              {activePlayers > 0 && <span className="text-gray-600">{activePlayers}</span>}
+            </span>
           </div>
         </div>
-        <div className="flex items-center gap-1.5">
-          <span className="font-pixel text-[5px] text-orange-400">🔥{profile.streak}</span>
-          <span className={`font-pixel text-[5px] ${
-            live === 'live' ? 'text-green-400' : live === 'offline' ? 'text-red-400 animate-pulse' : 'text-yellow-400'
-          }`}>{live === 'live' ? '●' : live === 'offline' ? '✖' : '○'}</span>
-        </div>
+
+        {/* Commentary ticker */}
+        {commentary && (
+          <div className="overflow-hidden border-t border-gray-900/80 py-1 px-3">
+            <p
+              className="font-pixel text-[5px] text-gray-500 whitespace-nowrap animate-ticker-scroll"
+              style={{ display: 'inline-block' }}
+            >
+              📡&nbsp;{commentary}
+            </p>
+          </div>
+        )}
       </div>
 
-      <EventBanner event={activeEvent} />
-
       {/* ── MAP ── */}
-      <div className="relative flex-1 min-h-0 overflow-hidden">
+      <div className={`relative flex-1 min-h-0 overflow-hidden transition-all duration-75 ${flash ? 'brightness-125' : ''}`}>
         <GameMap
           ref={mapRef}
           userFaction={faction}
@@ -236,149 +333,411 @@ export default function GameClient({
           onCityDblTap={handleDblTap}
           selectedTarget={selectedTarget}
         />
-        <div className="absolute top-2 left-1/2 -translate-x-1/2 pointer-events-none">
-          <ComboMeter combo={combo} />
-        </div>
-        {xpPopup && (
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
-            <p className="font-pixel text-[10px] text-yellow-400 animate-bounce"
-              style={{ textShadow: '0 0 10px #F59E0B' }}>{xpPopup}</p>
+
+        {/* Combo overlay */}
+        {combo.count >= 2 && (
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 pointer-events-none">
+            <div
+              className="px-3 py-1 border font-pixel text-[8px] animate-combo-pop"
+              style={{
+                color:           combo.count >= 10 ? '#FF4444' : combo.count >= 5 ? '#FFD700' : '#22C55E',
+                borderColor:     combo.count >= 10 ? '#FF444460' : combo.count >= 5 ? '#FFD70060' : '#22C55E60',
+                backgroundColor: combo.count >= 10 ? '#FF444415' : combo.count >= 5 ? '#FFD70015' : '#22C55E15',
+                textShadow:      `0 0 10px currentColor`,
+              }}
+            >
+              ×{combo.xpBonus.toFixed(1)} КОМБО
+            </div>
           </div>
         )}
-        {selectedTarget && (
-          <div className="absolute top-2 right-2 bg-dark/90 border border-red-700/50 px-2 py-1 pointer-events-none">
-            <p className="font-pixel text-[6px] text-red-400">ЦЕЛЬ:</p>
+
+        {/* Floating damage/XP numbers */}
+        {floats.map(f => (
+          <div
+            key={f.id}
+            className="absolute pointer-events-none font-pixel animate-dmg-float"
+            style={{
+              left:       `${f.x}%`,
+              bottom:     '35%',
+              fontSize:   f.crit ? '12px' : '9px',
+              color:      f.crit ? '#FF4444' : fc.color,
+              textShadow: `0 0 12px currentColor`,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {f.val}
+          </div>
+        ))}
+
+        {/* Target info overlay */}
+        {selectedTarget && targetHp && (
+          <div
+            className="absolute top-2 right-2 border px-2 py-1.5 min-w-[110px]"
+            style={{ background: '#0D0D15E0', borderColor: `${fc.color}40` }}
+          >
+            <p className="font-pixel text-[5px] text-gray-600">ЦЕЛЬ</p>
             <p className="font-pixel text-[7px] text-white">{CITIES[selectedTarget].nameRu}</p>
-            {targetTrait && <p className="font-pixel text-[5px] text-gray-500 mt-0.5">{targetTrait.description}</p>}
+            <div className="mt-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+              <div
+                className="h-full rounded-full transition-all duration-300"
+                style={{
+                  width: `${targetHpPct}%`,
+                  background: targetHpPct > 50 ? '#22C55E' : targetHpPct > 25 ? '#F59E0B' : '#EF4444',
+                }}
+              />
+            </div>
+            <p className="font-pixel text-[4px] text-gray-600 mt-0.5">{targetHp.hp}/{targetHp.maxHp} HP</p>
           </div>
         )}
       </div>
 
-      <NewsTicker backendUrl={BACKEND} />
-
       {/* ── ATTACK ZONE ── */}
-      <div className="flex-shrink-0 bg-panel border-t border-border">
+      <div className="flex-shrink-0" style={{ background: '#0D0D15', borderTop: `1px solid #1E1E2E` }}>
         <AbilityBar
           states={abilityStates} activating={activating}
           userXP={profile.xp} userLevel={profile.level}
           onActivate={(id) => { activateAbility(id); trackEvent('ability_use', 1) }}
         />
-        <div className="flex items-stretch">
-          {/* Faction mini-scores */}
-          <div className="flex flex-col justify-around px-2 py-1 border-r border-border min-w-[70px]">
-            {Object.entries(scores)
-              .sort(([,a],[,b]) => b - a).slice(0,3)
-              .map(([fId, score]) => (
-                <div key={fId} className="flex items-center gap-1">
-                  <span className="w-1.5 h-1.5" style={{ backgroundColor: FACTIONS[fId as FactionId].color }} />
-                  <span className="font-pixel text-[4px]" style={{ color: FACTIONS[fId as FactionId].color }}>
-                    {score >= 1000 ? `${(score/1000).toFixed(1)}k` : score}
-                  </span>
-                </div>
-              ))}
-          </div>
 
-          {/* ATTACK BUTTON */}
-          <button
-            onPointerDown={handleAttack}
-            disabled={!selectedTarget || clickStatus === 'banned'}
-            className={`flex-1 py-5 font-pixel text-[11px] relative overflow-hidden transition-all duration-75 ${
-              attackFlash ? 'scale-95' : ''
-            } ${
-              !selectedTarget
-                ? 'bg-gray-900 text-gray-700 border-t-0'
-                : clickStatus === 'banned'
-                ? 'bg-red-950 text-red-700'
-                : 'text-red-400'
-            }`}
-            style={
-              selectedTarget && clickStatus !== 'banned'
-                ? { backgroundColor: attackFlash ? `${fc.color}33` : '#111118', boxShadow: attackFlash ? `0 0 25px ${fc.color}` : 'none' }
-                : {}
-            }
-          >
-            {clickStatus === 'banned'
-              ? '🚫 AI-UYAT БАН'
-              : !selectedTarget
-              ? '← Выбери вражеский город'
-              : `👊 АТАКА ${CITIES[selectedTarget]?.nameRu}`}
-            {attackFlash && selectedTarget && (
-              <span className="absolute inset-0 opacity-20" style={{ backgroundColor: fc.color }} />
-            )}
-          </button>
-        </div>
+        <button
+          onPointerDown={handleAttack}
+          disabled={!selectedTarget || clickStatus === 'banned'}
+          className="w-full relative overflow-hidden transition-all"
+          style={{
+            height: 72,
+            background: !selectedTarget
+              ? '#0D0D15'
+              : flash
+                ? `linear-gradient(135deg, ${fc.color}50, ${fc.color}30)`
+                : `linear-gradient(135deg, ${fc.color}20, ${fc.color}10)`,
+            borderTop: `1px solid ${selectedTarget ? fc.color + '50' : '#1E1E2E'}`,
+            boxShadow: flash && selectedTarget ? `0 0 40px ${fc.color}60, inset 0 0 40px ${fc.color}20` : 'none',
+          }}
+        >
+          {!selectedTarget ? (
+            <p className="font-pixel text-[7px] text-gray-700 text-center">← Выбери вражеский город на карте</p>
+          ) : clickStatus === 'banned' ? (
+            <p className="font-pixel text-[7px] text-red-500 text-center">🚫 БАН · Слишком быстро</p>
+          ) : (
+            <div className="flex items-center justify-between px-4">
+              <div className="text-left">
+                <p className="font-pixel text-[6px] text-gray-500">АТАКОВАТЬ</p>
+                <p className="font-pixel text-[10px]" style={{ color: fc.color }}>
+                  {CITIES[selectedTarget].nameRu.toUpperCase()}
+                </p>
+                <p className="font-pixel text-[5px] text-gray-600">
+                  урон ~{effectiveDmg} · крит 5%
+                </p>
+              </div>
+              <div className="text-right">
+                <p
+                  className="font-pixel"
+                  style={{
+                    fontSize:   combo.count >= 5 ? '32px' : '26px',
+                    filter:     `drop-shadow(0 0 8px ${fc.color})`,
+                    color:      fc.color,
+                    lineHeight: 1,
+                  }}
+                >
+                  👊
+                </p>
+                {combo.count >= 2 && (
+                  <p className="font-pixel text-[5px]" style={{ color: combo.count >= 10 ? '#FF4444' : '#FFD700' }}>
+                    ×{combo.xpBonus.toFixed(1)}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Flash ripple */}
+          {flash && selectedTarget && (
+            <span
+              className="absolute inset-0 pointer-events-none"
+              style={{ background: `radial-gradient(ellipse at center, ${fc.color}30 0%, transparent 70%)` }}
+            />
+          )}
+        </button>
       </div>
 
-      {/* ── BOTTOM TAB BAR ── */}
-      <div className="flex-shrink-0 flex border-t border-border bg-panel">
+      {/* ── BOTTOM TABS ── */}
+      <div
+        className="flex-shrink-0 flex"
+        style={{ background: '#0D0D15', borderTop: '1px solid #1E1E2E' }}
+      >
         {([
-          { id: 'battle' as BottomTab, icon: '⚔',  label: 'БОЙ'    },
-          { id: 'quests' as BottomTab, icon: '📜',  label: 'КВЕСТЫ' },
-          { id: 'rank'   as BottomTab, icon: '🏆',  label: 'ТОП'    },
-          { id: 'me'     as BottomTab, icon: '👤',  label: 'Я'      },
-        ]).map(tab => (
-          <button
-            key={tab.id}
-            onClick={() => {
-              setBottomTab(tab.id)
-              setHudOpen(prev => bottomTab === tab.id ? !prev : true)
-            }}
-            className={`flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors ${
-              hudOpen && bottomTab === tab.id ? 'text-white' : 'text-gray-600'
-            }`}
-          >
-            <span className="text-base">{tab.icon}</span>
-            <span className="font-pixel text-[4px]">{tab.label}</span>
-          </button>
-        ))}
+          { id: 'battle' as Tab, icon: '⚔',  label: 'БОЙ'    },
+          { id: 'quests' as Tab, icon: '📜',  label: 'ЗАДАЧИ' },
+          { id: 'rank'   as Tab, icon: '🏆',  label: 'ТОП'    },
+          { id: 'clan'   as Tab, icon: '🛡',  label: 'КЛАН'   },
+          { id: 'me'     as Tab, icon: '👤',  label: 'Я'      },
+        ]).map(t => {
+          const active = sheet && tab === t.id
+          return (
+            <button
+              key={t.id}
+              onClick={() => { setTab(t.id); setSheet(prev => tab === t.id ? !prev : true) }}
+              className="flex-1 flex flex-col items-center py-2 gap-0.5 transition-colors"
+              style={{ color: active ? fc.color : '#4B5563' }}
+            >
+              <span className="text-base leading-none">{t.icon}</span>
+              <span className="font-pixel text-[4px]">{t.label}</span>
+              {active && <span className="w-4 h-0.5 rounded-full" style={{ background: fc.color }} />}
+            </button>
+          )
+        })}
       </div>
 
       {/* ── BOTTOM SHEET ── */}
       <div
-        className={`fixed inset-x-0 bottom-0 z-30 bg-panel border-t-2 border-border transition-transform duration-300 ease-out`}
+        className="fixed inset-x-0 bottom-0 z-30 transition-transform duration-300 ease-out"
         style={{
-          maxHeight: '72vh', overflowY: 'auto',
-          transform: hudOpen ? 'translateY(0)' : 'translateY(100%)',
-          paddingBottom: 'env(safe-area-inset-bottom)',
+          background:        '#0D0D15',
+          borderTop:         `2px solid ${fc.color}40`,
+          maxHeight:         '72vh',
+          overflowY:         'auto',
+          transform:         sheet ? 'translateY(0)' : 'translateY(100%)',
+          paddingBottom:     'calc(env(safe-area-inset-bottom) + 4.5rem)',
+          boxShadow:         `0 -8px 40px ${fc.color}20`,
         }}
       >
-        <div
-          className="sticky top-0 flex justify-center py-2 bg-panel border-b border-border cursor-pointer z-10"
-          onClick={() => setHudOpen(false)}
-        >
-          <div className="w-10 h-1 bg-gray-700 rounded-full" />
+        {/* Drag handle */}
+        <div className="sticky top-0 flex justify-center py-2 cursor-pointer z-10" onClick={() => setSheet(false)}
+          style={{ background: '#0D0D15', borderBottom: '1px solid #1E1E2E' }}>
+          <div className="w-10 h-1 bg-gray-800 rounded-full" />
         </div>
 
-        {bottomTab === 'battle' && (
-          <FactionHUD scores={scores} userFaction={faction} userCityId={cityId as CityId}
-            clickStatus={clickStatus} targetCity={selectedTarget} onAttackClick={handleAttack} />
+        {/* ── БОЙ tab ── */}
+        {tab === 'battle' && (
+          <div className="p-4 space-y-4">
+            {/* War progress */}
+            <div>
+              <p className="font-pixel text-[6px] text-gray-600 mb-3">ВОЙНА ОРД — {Object.values(scores).reduce((a,b) => a+b, 0)} городов</p>
+              <div className="space-y-2">
+                {sortedFactions.map(([fId, count], i) => {
+                  const f   = FACTIONS[fId]
+                  const pct = Math.round((count / 10) * 100)
+                  const isMe = fId === faction
+                  return (
+                    <div key={fId} className="space-y-0.5">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          {i === 0 && <span className="font-pixel text-[5px] text-yellow-400">👑</span>}
+                          <span className="font-pixel text-[6px]" style={{ color: f.color }}>
+                            {isMe ? `▶ ${f.nameRu}` : f.nameRu}
+                          </span>
+                        </div>
+                        <span className="font-pixel text-[6px]" style={{ color: f.color }}>
+                          {count}/10
+                        </span>
+                      </div>
+                      <div className="h-2 bg-gray-900 rounded-full overflow-hidden border border-gray-800/50">
+                        <div
+                          className="h-full rounded-full transition-all duration-700"
+                          style={{
+                            width: `${pct}%`,
+                            background: isMe
+                              ? `linear-gradient(90deg, ${f.color}aa, ${f.color})`
+                              : `${f.color}70`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            {/* My contribution */}
+            <div
+              className="border p-3 space-y-1"
+              style={{ borderColor: `${fc.color}30`, background: `${fc.color}08` }}
+            >
+              <p className="font-pixel text-[5px] text-gray-600">МОЙ ВКЛАД</p>
+              <div className="flex gap-4">
+                <div>
+                  <p className="font-pixel text-[8px]" style={{ color: fc.color }}>{profile.totalClicks}</p>
+                  <p className="font-pixel text-[4px] text-gray-600">кликов</p>
+                </div>
+                <div>
+                  <p className="font-pixel text-[8px] text-white">{profile.xp}</p>
+                  <p className="font-pixel text-[4px] text-gray-600">XP</p>
+                </div>
+                <div>
+                  <p className="font-pixel text-[8px] text-yellow-400">{profile.level}</p>
+                  <p className="font-pixel text-[4px] text-gray-600">уровень</p>
+                </div>
+              </div>
+            </div>
+
+            {activeEvent && (
+              <div className="border border-yellow-900/50 bg-yellow-950/20 p-3">
+                <p className="font-pixel text-[5px] text-yellow-600">АКТИВНОЕ СОБЫТИЕ</p>
+                <p className="font-pixel text-[7px] text-yellow-400 mt-0.5">{activeEvent.title}</p>
+                <p className="font-pixel text-[5px] text-gray-500">{activeEvent.description} · ×{xpMultiplier} XP</p>
+              </div>
+            )}
+          </div>
         )}
-        {bottomTab === 'quests' && <DailyQuests quests={quests} progress={progress} loading={false} />}
-        {bottomTab === 'rank'   && <Leaderboard currentUserId={userId} />}
-        {bottomTab === 'me'     && (
-          <div className="p-3 space-y-3">
-            <PlayerProfile profile={profile} xpProgress={xpProgress} levelUpAnim={levelUpAnim} />
-            <div className="bg-dark border border-border p-3">
-              <p className="font-pixel text-[6px] text-gray-500 mb-2">РЕФЕРАЛЬНЫЙ КОД</p>
-              <div className="flex items-center gap-2">
-                <p className="font-pixel text-[10px] text-yellow-400 tracking-widest">
-                  {(profile as any).referralCode ?? displayName.slice(0,8).toUpperCase()}
-                </p>
+
+        {/* ── КВЕСТЫ tab ── */}
+        {tab === 'quests' && <DailyQuests quests={quests} progress={progress} loading={false} />}
+
+        {/* ── ТОП tab ── */}
+        {tab === 'rank' && <Leaderboard currentUserId={userId} />}
+
+        {/* ── КЛАН tab ── */}
+        {tab === 'clan' && (
+          <div className="p-4 space-y-4">
+            {clanData ? (
+              <>
+                {/* Clan header */}
+                <div
+                  className="border p-4 text-center space-y-1"
+                  style={{ borderColor: `${fc.color}40`, background: `${fc.color}0A` }}
+                >
+                  <p style={{ fontSize: 36 }}>{clanData.emoji}</p>
+                  <p className="font-pixel text-[6px] text-gray-500">[{clanData.tag}]</p>
+                  <p className="font-pixel text-[10px]" style={{ color: fc.color }}>{clanData.name}</p>
+                  <p className="font-pixel text-[5px] text-gray-600">{clanData.member_count} участников</p>
+                </div>
+
+                {/* Invite */}
                 <button
                   onClick={() => {
-                    const code = displayName.slice(0,8).toUpperCase()
-                    navigator.share?.({
-                      title: 'KZ Battle Royale',
-                      text: `Вступай! Мой код: ${code}`,
-                      url: `${window.location.origin}?ref=${code}`,
-                    }).catch(() => navigator.clipboard?.writeText(code))
+                    const link = `${window.location.origin}/clans?join=${clanData.id}`
+                    navigator.share?.({ title: clanData.name, url: link }).catch(() => navigator.clipboard?.writeText(link))
                   }}
-                  className="font-pixel text-[6px] text-blue-400 border border-blue-900 px-2 py-1"
+                  className="w-full py-2 font-pixel text-[6px] border"
+                  style={{ borderColor: `${fc.color}40`, color: fc.color }}
                 >
-                  ПОДЕЛИТЬСЯ
+                  📤 ПРИГЛАСИТЬ В КЛАН
+                </button>
+
+                <button
+                  onClick={() => window.location.href = '/clans'}
+                  className="w-full py-2 font-pixel text-[6px] text-gray-600 border border-gray-800"
+                >
+                  Управление кланом →
+                </button>
+
+                <button
+                  onClick={leaveClan}
+                  className="w-full py-2 font-pixel text-[5px] text-red-900 border border-red-950"
+                >
+                  Покинуть клан
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="text-center py-4">
+                  <p className="text-4xl">🛡</p>
+                  <p className="font-pixel text-[7px] text-white mt-2">У тебя нет клана</p>
+                  <p className="font-pixel text-[5px] text-gray-600 mt-1">Создай или вступи в клан своей фракции</p>
+                </div>
+
+                <div className="space-y-2">
+                  <p className="font-pixel text-[5px] text-gray-600">СОЗДАТЬ КЛАН</p>
+                  <input
+                    type="text" placeholder="Название клана" maxLength={24}
+                    value={clanName} onChange={e => setClanName(e.target.value)}
+                    className="w-full bg-dark border border-border px-3 py-2 font-pixel text-[7px] text-white focus:outline-none focus:border-gray-500"
+                  />
+                  <div className="flex gap-2">
+                    <input
+                      type="text" placeholder="ТЕГ" maxLength={5}
+                      value={clanTag} onChange={e => setClanTag(e.target.value.toUpperCase())}
+                      className="w-24 bg-dark border border-border px-2 py-2 font-pixel text-[7px] text-white focus:outline-none focus:border-gray-500 uppercase"
+                    />
+                    <select
+                      value={clanEmoji} onChange={e => setClanEmoji(e.target.value)}
+                      className="flex-1 bg-dark border border-border px-2 py-2 font-pixel text-[7px] text-white focus:outline-none"
+                    >
+                      {['⚔️','🛡','🗡','🏹','🪃','🔥','⚡','💀','🦅','🐺','🐉','🦁'].map(e => (
+                        <option key={e} value={e}>{e}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <button
+                    onClick={createClan}
+                    disabled={clanLoading || !clanName.trim() || !clanTag.trim()}
+                    className="w-full py-3 font-pixel text-[7px] text-black disabled:opacity-50"
+                    style={{ background: fc.color }}
+                  >
+                    {clanLoading ? '...' : 'СОЗДАТЬ'}
+                  </button>
+                </div>
+
+                <button
+                  onClick={() => window.location.href = '/clans'}
+                  className="w-full py-2 font-pixel text-[6px] text-gray-600 border border-gray-800"
+                >
+                  Просмотр кланов →
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ── Я tab ── */}
+        {tab === 'me' && (
+          <div className="p-4 space-y-4">
+            {/* Profile card */}
+            <div
+              className="border p-4"
+              style={{ borderColor: `${fc.color}30`, background: `${fc.color}08` }}
+            >
+              <div className="flex items-center gap-3">
+                <span style={{ fontSize: 40, filter: `drop-shadow(0 0 10px ${lvl.color})` }}>{lvl.icon}</span>
+                <div>
+                  <p className="font-pixel text-[8px] text-white">{displayName}</p>
+                  <p className="font-pixel text-[6px]" style={{ color: fc.color }}>{fc.nameRu}</p>
+                  <p className="font-pixel text-[5px] text-gray-500">{lvl.title} · Lv{profile.level}</p>
+                </div>
+              </div>
+              <div className="mt-3 h-2 bg-gray-900 rounded-full overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all duration-500"
+                  style={{ width: `${xpProgress.pct}%`, background: `linear-gradient(90deg, ${lvl.color}88, ${lvl.color})` }}
+                />
+              </div>
+              <p className="font-pixel text-[4px] text-gray-600 mt-0.5 text-right">
+                {profile.xp} / {xpProgress.needed} XP
+              </p>
+            </div>
+
+            {/* Stats grid */}
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { label: 'КЛИКОВ', val: profile.totalClicks, color: fc.color },
+                { label: 'СТРИК',  val: `🔥${profile.streak}`, color: '#F97316' },
+                { label: 'КОМБО',  val: `×${maxCombo}`,         color: '#FFD700' },
+              ].map(s => (
+                <div key={s.label} className="border border-gray-800 bg-panel p-2 text-center">
+                  <p className="font-pixel text-[9px]" style={{ color: s.color }}>{s.val}</p>
+                  <p className="font-pixel text-[4px] text-gray-600">{s.label}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Referral */}
+            <div className="border border-gray-800 p-3 space-y-2">
+              <p className="font-pixel text-[5px] text-gray-600">ПРИГЛАСИ ДРУГА — ПОЛУЧИ +3 ДНЯ</p>
+              <div className="flex gap-2">
+                <div className="flex-1 bg-dark border border-border px-2 py-1.5">
+                  <p className="font-pixel text-[7px] text-yellow-400 tracking-widest">{referralCode ?? displayName.slice(0,6).toUpperCase()}</p>
+                </div>
+                <button
+                  onClick={() => {
+                    navigator.share?.({ title: 'KZ Battle Royale', url: inviteUrl })
+                      .catch(() => navigator.clipboard?.writeText(inviteUrl))
+                  }}
+                  className="px-3 font-pixel text-[6px] border"
+                  style={{ borderColor: `${fc.color}50`, color: fc.color }}
+                >
+                  SHARE
                 </button>
               </div>
-              <p className="font-pixel text-[5px] text-gray-600 mt-2">Друг → ты +3 дня, он +3 дня</p>
             </div>
           </div>
         )}

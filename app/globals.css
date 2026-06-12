@@ -7,16 +7,70 @@
 
   --font-pixel: 'Courier New', Courier, monospace;
 
-  --animate-capture-flash: capture-flash 0.8s ease-out forwards;
-  --animate-xp-float:      xp-float 0.9s ease-out forwards;
-
   @keyframes capture-flash {
-    0%   { opacity: 1; transform: scale(1.2); }
-    100% { opacity: 0; transform: scale(1);   }
+    0%   { opacity: 1; transform: scale(1.15); }
+    100% { opacity: 0; transform: scale(1);    }
   }
   @keyframes xp-float {
-    0%   { transform: translateY(0);     opacity: 1; }
-    100% { transform: translateY(-40px); opacity: 0; }
+    0%   { transform: translateY(0)     scale(1.2); opacity: 1; }
+    60%  { transform: translateY(-24px) scale(1.1); opacity: 1; }
+    100% { transform: translateY(-44px) scale(0.9); opacity: 0; }
+  }
+  @keyframes dmg-float {
+    0%   { transform: translateY(0)     scale(1.3); opacity: 1; }
+    100% { transform: translateY(-36px) scale(0.8); opacity: 0; }
+  }
+  @keyframes pulse-glow {
+    0%, 100% { opacity: 0.6; }
+    50%      { opacity: 1;   }
+  }
+  @keyframes combo-pop {
+    0%   { transform: scale(1);    }
+    30%  { transform: scale(1.35); }
+    60%  { transform: scale(0.92); }
+    100% { transform: scale(1);    }
+  }
+  @keyframes crit-shake {
+    0%, 100% { transform: translate(0,   0); }
+    20%      { transform: translate(-4px, 3px); }
+    40%      { transform: translate(4px, -3px); }
+    60%      { transform: translate(-3px, 2px); }
+    80%      { transform: translate(3px, -2px); }
+  }
+  @keyframes level-burst {
+    0%   { transform: scale(0.5); opacity: 0; }
+    40%  { transform: scale(1.3); opacity: 1; }
+    70%  { transform: scale(0.95); }
+    100% { transform: scale(1);   opacity: 1; }
+  }
+  @keyframes slide-up {
+    from { transform: translateY(100%); opacity: 0; }
+    to   { transform: translateY(0);    opacity: 1; }
+  }
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  @keyframes war-bar {
+    from { width: 0; }
+    to   { width: var(--target-w); }
+  }
+  @keyframes ticker-scroll {
+    from { transform: translateX(100%);  }
+    to   { transform: translateX(-100%); }
+  }
+  @keyframes capture-ring {
+    0%   { transform: scale(1);   opacity: 0.8; }
+    100% { transform: scale(2.5); opacity: 0;   }
+  }
+  @keyframes btn-press {
+    0%   { transform: scale(1);    }
+    40%  { transform: scale(0.94); }
+    100% { transform: scale(1);    }
+  }
+  @keyframes online-dot {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.3; }
   }
 }
 
@@ -56,15 +110,23 @@
   letter-spacing: 0.05em;
 }
 
-@utility safe-top {
-  padding-top: env(safe-area-inset-top);
-}
-
-@utility safe-bottom {
-  padding-bottom: env(safe-area-inset-bottom);
-}
-
+@utility safe-top    { padding-top:    env(safe-area-inset-top);    }
+@utility safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
 @utility scrollbar-none {
   scrollbar-width: none;
   &::-webkit-scrollbar { display: none; }
 }
+
+@utility animate-capture-flash  { animation: capture-flash  0.8s ease-out forwards; }
+@utility animate-xp-float       { animation: xp-float       0.9s ease-out forwards; }
+@utility animate-dmg-float      { animation: dmg-float      0.8s ease-out forwards; }
+@utility animate-pulse-glow     { animation: pulse-glow     1.8s ease-in-out infinite; }
+@utility animate-combo-pop      { animation: combo-pop      0.35s ease-out forwards; }
+@utility animate-crit-shake     { animation: crit-shake     0.4s ease-out; }
+@utility animate-level-burst    { animation: level-burst    0.6s cubic-bezier(.36,.07,.19,.97) forwards; }
+@utility animate-slide-up       { animation: slide-up       0.35s ease-out forwards; }
+@utility animate-fade-in        { animation: fade-in        0.3s ease-out forwards; }
+@utility animate-capture-ring   { animation: capture-ring   0.8s ease-out forwards; }
+@utility animate-btn-press      { animation: btn-press      0.15s ease-out; }
+@utility animate-online-dot     { animation: online-dot     1.2s ease-in-out infinite; }
+@utility animate-ticker-scroll  { animation: ticker-scroll  18s linear infinite; }

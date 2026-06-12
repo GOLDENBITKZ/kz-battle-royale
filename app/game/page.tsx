@@ -20,7 +20,7 @@ export default async function GamePage() {
 
   const { data: profile } = await supabase
     .from('profiles')
-    .select('faction, city, display_name, paid_until, xp, level, streak_days, total_clicks')
+    .select('faction, city, display_name, paid_until, xp, level, streak_days, total_clicks, referral_code')
     .eq('id', session.user.id)
     .single()
 
@@ -38,6 +38,7 @@ export default async function GamePage() {
       initialLevel={profile.level ?? 1}
       initialStreak={profile.streak_days ?? 1}
       totalClicks={profile.total_clicks ?? 0}
+      referralCode={profile.referral_code ?? undefined}
     />
   )
 }

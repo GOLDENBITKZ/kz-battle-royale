@@ -39,5 +39,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'DB error' }, { status: 500 })
   }
 
+  // Telegram notification
+  const tgToken  = process.env.TELEGRAM_BOT_TOKEN
+  const tgChatId = process.env.TELEGRAM_ADMIN_CHAT_ID
+  if (tgToken && tgChatId) {
+    const days = Math.round(amount / 100) * 30
+    fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: tgChatId,
+        text: `💳 <b>Новая оплата!</b>\n\nТелефон: <code>${phone}</code>\nСумма: <b>${amount} ₸</b>\nПодписка: +${days} дней\nTxn: <code>${txn_id}</code>`,
+        parse_mode: 'HTML',
+      }),
+    }).catch(() => {})
+  }
+
   return NextResponse.json({ ok: true })
 }
