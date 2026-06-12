@@ -15,12 +15,18 @@ export async function GET() {
   const groqKey = process.env.GROQ_API_KEY
   if (!groqKey) return NextResponse.json({ skipped: 'no GROQ_API_KEY' })
 
-  const supabase = createClient(
+  // Use anon key for public city_state read
+  const db = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+  // Use service role for upsert to game_events
+  const admin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
   )
 
-  const { data: cities } = await supabase
+  const { data: cities } = await db
     .from('city_state')
     .select('city_id, hp, max_hp, owner_faction, total_attacks')
 
@@ -63,7 +69,7 @@ export async function GET() {
   const commentary = groqData.choices?.[0]?.message?.content?.trim() ?? ''
 
   if (commentary) {
-    await supabase.from('game_events').upsert(
+    await admin.from('game_events').upsert(
       { id: 'ai_commentary', type: 'commentary', message: commentary, data: {}, created_at: new Date().toISOString() },
       { onConflict: 'id' }
     )
