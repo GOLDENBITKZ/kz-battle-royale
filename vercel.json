@@ -1,6 +1,5 @@
 {
   "crons": [
-    { "path": "/api/cron/tick",        "schedule": "* * * * *"    },
-    { "path": "/api/cron/commentary",  "schedule": "*/10 * * * *" }
+    { "path": "/api/cron/commentary", "schedule": "0 12 * * *" }
   ]
 }
