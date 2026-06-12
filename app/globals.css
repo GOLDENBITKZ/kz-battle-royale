@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+@theme {
+  --color-dark:   #0A0A0F;
+  --color-panel:  #111118;
+  --color-border: #1E1E2E;
+
+  --font-pixel: 'Courier New', Courier, monospace;
+
+  --animate-capture-flash: capture-flash 0.8s ease-out forwards;
+  --animate-xp-float:      xp-float 0.9s ease-out forwards;
+
+  @keyframes capture-flash {
+    0%   { opacity: 1; transform: scale(1.2); }
+    100% { opacity: 0; transform: scale(1);   }
+  }
+  @keyframes xp-float {
+    0%   { transform: translateY(0);     opacity: 1; }
+    100% { transform: translateY(-40px); opacity: 0; }
+  }
+}
+
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+
+  html, body {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    background: var(--color-dark);
+    color: #F9FAFB;
+    overscroll-behavior: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    touch-action: none;
+  }
+
+  ::-webkit-scrollbar { display: none; }
+  * { scrollbar-width: none; }
+}
+
+@utility font-pixel {
+  font-family: 'Courier New', Courier, monospace;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+@utility safe-top {
+  padding-top: env(safe-area-inset-top);
+}
+
+@utility safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+@utility scrollbar-none {
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
+}
