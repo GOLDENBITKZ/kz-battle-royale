@@ -68,12 +68,16 @@ export async function GET() {
   const groqData = await groqRes.json()
   const commentary = groqData.choices?.[0]?.message?.content?.trim() ?? ''
 
+  let upsertError: string | null = null
   if (commentary) {
-    await admin.from('game_events').upsert(
-      { id: 'ai_commentary', type: 'commentary', message: commentary, data: {}, created_at: new Date().toISOString() },
+    // Strip leading/trailing quotes that LLM sometimes adds
+    const clean = commentary.replace(/^["«»]+|["«»]+$/g, '').trim()
+    const { error } = await admin.from('game_events').upsert(
+      { id: 'ai_commentary', type: 'commentary', message: clean, data: {}, created_at: new Date().toISOString() },
       { onConflict: 'id' }
     )
+    upsertError = error?.message ?? null
   }
 
-  return NextResponse.json({ ok: true, commentary })
+  return NextResponse.json({ ok: true, commentary, upsertError })
 }
